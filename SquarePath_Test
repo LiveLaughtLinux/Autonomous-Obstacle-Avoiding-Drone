@@ -1,154 +1,156 @@
-import time
-import cflib.crtp
-from cflib.crazyflie.swarm import CachedCfFactory
-from cflib.crazyflie.swarm import Swarm
+# -------------------------------------------------------------------------
+# Import required libraries
+# -------------------------------------------------------------------------
+import logging               # Used to manage log messages (e.g., errors, warnings)
+import time                  # Provides delay and timing functions
+import cflib.crtp            # Initializes the Crazy RealTime Protocol (CRTP) driver (required to connect)
+from cflib.crazyflie import Crazyflie                     # Core Crazyflie communication interface
+from cflib.crazyflie.syncCrazyflie import SyncCrazyflie   # Manages connection lifecycle (auto open/close)
+from cflib.positioning.position_hl_commander import PositionHlCommander  # High-level position control (go_to, takeoff, land)
+from cflib.utils import uri_helper                        # Utility to parse connection URI
+from cflib.utils.multiranger import Multiranger           # Reads distance sensors (front, back, left, right, up)
 
-# Change uris and sequences according to your setup
-# URIs in a swarm using the same radio must also be on the same channel
-URI1 = 'radio://0/80/2M/E7E7E7E705'
+# -------------------------------------------------------------------------
+# Connection setup
+# -------------------------------------------------------------------------
+# This URI defines how to connect to your Crazyflie over radio.
+# Example format: radio://<channel>/<rate>/<mode>/<address>
+# "E7E7E7E700" is the unique address of your Crazyflie.
+URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E701')
+
+# Only show critical errors (not debug info)
+logging.basicConfig(level=logging.ERROR)
+
+# -------------------------------------------------------------------------
+# Helper function: detect nearby obstacle
+# -------------------------------------------------------------------------
+def is_close(distance, threshold=0.25):
+    """
+    Returns True if an obstacle is detected closer than the threshold distance.
+    'distance' is read from a Multiranger sensor.
+    'threshold' is in meters (default = 0.25 m).
+    """
+    return distance is not None and distance < threshold
 
 
-z0 = 0.4
-z = 1.0
-
-x0 = 1.0
-x1 = 0
-x2 = -1.0
-
-y0 = 0
-y1 = -0.4
-y2 = 0.4
-y3 = 1.0
-
-#    x   y   z  time
-sequence1 = [
-                (x1, y0, z0, 3.0),
-                (x0, y0, z0, 3.0),
-                (x0, y1, z0, 3.0),
-                (x1, y1, z0, 3.0),
-                (x1, y0, z0, 3.0),
-            ]
-
-
-newsequence =  [
-                    (x1, y0, z0, 3.0),   # Start (initial hover)
-                    (x0, y0, z0, 3.0),   # 1. Forward
-                    (x0, y1, z0, 3.0),   # 2. Right
-                    (x1, y1, z0, 3.0),   # 3. Back
-                    (x2, y1, z0, 3.0),   # 4. Back again (further back)
-                    (x2, y0, z0, 3.0),   # 5. Left
-                    (x1, y0, z0, 3.0),   # 6. Forward (return to starting point)
-                ]
-
+# -------------------------------------------------------------------------
+# Helper function: move safely with obstacle avoidance
+# -------------------------------------------------------------------------
+def move_with_avoidance(commander, multiranger, target_x, target_y, z, step=0.1):
+    """
+    Moves the drone gradually toward a target position (x, y, z),
+    while continuously checking for obstacles using the Multiranger sensors.
     
-sequence2 = [
-                (x0, y1, z0, 3.0),
-                (x0, y1, z0, 30.0),
-                (x0, y1, z0, 3.0),
-            ]
+    Parameters:
+        commander   - the high-level position commander (controls movement)
+        multiranger - sensor interface for detecting obstacles
+        target_x, target_y, z - the target coordinates to move to
+        step        - the movement increment (in meters) per loop iteration
+    """
+    # Start at current coordinates (assumed 0,0)
+    x, y = 0.0, 0.0
 
-sequence3 = [
-                (x0, y2, z0, 3.0),
-                (x0, y2, z, 30.0),
-                (x0, y2, z0, 3.0),
-            ]
+    # Continue looping until drone reaches the target within ±5 cm tolerance
+    while abs(x - target_x) > 0.05 or abs(y - target_y) > 0.05:
+        
+        # ---------- OBSTACLE CHECKS ----------
+        if is_close(multiranger.front):
+            # If something is in front (within 25 cm), sidestep right by 20 cm
+            print("⚠️ Obstacle detected ahead — sidestepping right 20cm")
+            y += 0.2
+            commander.go_to(x, y, z)
+            time.sleep(0.5)
 
-seq_args = {
-    URI1: [newsequence],
-    #URI2: [sequence2],
-    #URI3: [sequence3],
-}
+        elif is_close(multiranger.right):
+            # If something is on the right, sidestep left by 20 cm
+            print("⚠️ Obstacle detected on right — sidestepping left 20cm")
+            y -= 0.2
+            commander.go_to(x, y, z)
+            time.sleep(0.5)
 
-# List of URIs, comment the one you do not want to fly
-uris = {
-    URI1,
-    #URI2,
-    #URI3,
-}
+        else:
+            # ---------- NO OBSTACLE: MOVE TOWARD TARGET ----------
+            # Adjust x-position (forward/backward)
+            if x < target_x:
+                x += step
+            elif x > target_x:
+                x -= step
 
+            # Adjust y-position (left/right)
+            if y < target_y:
+                y += step
+            elif y > target_y:
+                y -= step
 
-def wait_for_param_download(scf):
-    while not scf.cf.param.is_updated:
-        time.sleep(1.0)
-    print('Parameters downloaded for', scf.cf.link_uri)
+            # Send new target position command to the drone
+            commander.go_to(x, y, z)
+            time.sleep(0.2)
 
-
-def arm(scf):
-    scf.cf.platform.send_arming_request(True)
-    time.sleep(1.0)
-
-
-def take_off(cf, position):
-    take_off_time = 1.0
-    sleep_time = 0.1
-    steps = int(take_off_time / sleep_time)
-    vz = position[2] / take_off_time
-
-    print(vz)
-
-    for i in range(steps):
-        cf.commander.send_velocity_world_setpoint(0, 0, vz, 0)
-        time.sleep(sleep_time)
-
-
-def land(cf, position):
-    landing_time = 1.0
-    sleep_time = 0.1
-    steps = int(landing_time / sleep_time)
-    vz = -position[2] / landing_time
-
-    print(vz)
-
-    for _ in range(steps):
-        cf.commander.send_velocity_world_setpoint(0, 0, vz, 0)
-        time.sleep(sleep_time)
-
-    cf.commander.send_stop_setpoint()
-    # Hand control over to the high level commander to avoid timeout and locking of the Crazyflie
-    cf.commander.send_notify_setpoint_stop()
-
-    # Make sure that the last packet leaves before the link is closed
-    # since the message queue is not flushed before closing
-    time.sleep(0.1)
+    # Once the target is reached, return the new coordinates
+    return x, y
 
 
-def run_sequence(scf, sequence):
-    try:
-        cf = scf.cf
-
-        take_off(cf, sequence[0])
-        for position in sequence:
-            print('Setting position {}'.format(position))
-            end_time = time.time() + position[3]
-            while time.time() < end_time:
-                cf.commander.send_position_setpoint(position[0],
-                                                    position[1],
-                                                    position[2], 0)
-                time.sleep(0.1)
-        land(cf, sequence[-1])
-    except Exception as e:
-        print(e)
-
-
+# -------------------------------------------------------------------------
+# Main program starts here
+# -------------------------------------------------------------------------
 if __name__ == '__main__':
-    # logging.basicConfig(level=logging.DEBUG)
+    # Initialize the Crazyflie communication drivers
+    # Must always be called before connecting to a drone
     cflib.crtp.init_drivers()
 
-    factory = CachedCfFactory(rw_cache='./cache')
-    with Swarm(uris, factory=factory) as swarm:
-        # If the copters are started in their correct positions this is
-        # probably not needed. The Kalman filter will have time to converge
-        # any way since it takes a while to start them all up and connect. We
-        # keep the code here to illustrate how to do it.
-        # swarm.reset_estimators()
+    # Create a Crazyflie object, using a cache folder for parameter downloads
+    cf = Crazyflie(rw_cache='./cache')
 
-        # The current values of all parameters are downloaded as a part of the
-        # connections sequence. Since we have 10 copters this is clogging up
-        # communication and we have to wait for it to finish before we start
-        # flying.
-        print('Waiting for parameters to be downloaded...')
-        swarm.parallel(wait_for_param_download)
+    # Establish a safe, synchronized connection with the Crazyflie
+    with SyncCrazyflie(URI, cf=cf) as scf:
+        # Arm (activate) the motors before flight
+        scf.cf.platform.send_arming_request(True)
+        time.sleep(1.0)
 
-        swarm.parallel(arm)
+        # Create a high-level position commander for easy movement control
+        # Default takeoff height = 0.4 m
+        with PositionHlCommander(scf, default_height=0.4) as commander:
+            
+            # Enable the Multiranger (distance sensors)
+            with Multiranger(scf) as multiranger:
 
-        swarm.parallel(run_sequence, args_dict=seq_args)
+                print("Takeoff...")
+                time.sleep(3)  # Small delay to ensure stable lift-off
+
+                # -------------------------------
+                # Define the flight path (square)
+                # -------------------------------
+                # Each waypoint is a (x, y, z) position in meters
+                waypoints = [
+                                (1.0, 0.0, 0.4),   # 1. Move forward
+                                (1.0, 0.7, 0.4),   # 2. Move right
+                                (0.0, 0.7, 0.4),   # 3. Move back
+                                (-1.0, 0.7, 0.4),  # 4. Move back again (further back)
+                                (-1.0, 0.0, 0.4),  # 5. Move left
+                                (0.0, 0.0, 0.4)    # 6. Return to start point
+                            ]
+
+                # Start position (origin)
+                x, y, z = 0.0, 0.0, 0.4
+
+                # -------------------------------
+                # Execute each waypoint in sequence
+                # -------------------------------
+                for i, (target_x, target_y, target_z) in enumerate(waypoints):
+                    print(f"➡️ Moving to waypoint {i+1}: ({target_x}, {target_y}, {target_z})")
+
+                    # Move with obstacle avoidance toward each waypoint
+                    x, y = move_with_avoidance(commander, multiranger, target_x, target_y, target_z)
+                    time.sleep(1)
+
+                # -------------------------------
+                # End of mission: hover and land
+                # -------------------------------
+                print("Square path complete. Hovering for 5 seconds...")
+                time.sleep(5)
+
+                print("Landing...")
+                commander.land(0.0, 2.0)  # Smooth landing
+                time.sleep(3)
+
+                print("Mission completed safely!")
