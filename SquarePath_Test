@@ -1,156 +1,142 @@
-# -------------------------------------------------------------------------
-# Import required libraries
-# -------------------------------------------------------------------------
-import logging               # Used to manage log messages (e.g., errors, warnings)
-import time                  # Provides delay and timing functions
-import cflib.crtp            # Initializes the Crazy RealTime Protocol (CRTP) driver (required to connect)
-from cflib.crazyflie import Crazyflie                     # Core Crazyflie communication interface
-from cflib.crazyflie.syncCrazyflie import SyncCrazyflie   # Manages connection lifecycle (auto open/close)
-from cflib.positioning.position_hl_commander import PositionHlCommander  # High-level position control (go_to, takeoff, land)
-from cflib.utils import uri_helper                        # Utility to parse connection URI
-from cflib.utils.multiranger import Multiranger           # Reads distance sensors (front, back, left, right, up)
+#Importing modules and libraries
+import logging
+import time
+import cflib.crtp
+from cflib.crazyflie import Crazyflie
+from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
+from cflib.positioning.position_hl_commander import PositionHlCommander
+from cflib.utils import uri_helper
+from cflib.utils.multiranger import Multiranger
 
-# -------------------------------------------------------------------------
+
 # Connection setup
-# -------------------------------------------------------------------------
-# This URI defines how to connect to your Crazyflie over radio.
-# Example format: radio://<channel>/<rate>/<mode>/<address>
-# "E7E7E7E700" is the unique address of your Crazyflie.
-URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E701')
-
-# Only show critical errors (not debug info)
+URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E700')
 logging.basicConfig(level=logging.ERROR)
 
-# -------------------------------------------------------------------------
-# Helper function: detect nearby obstacle
-# -------------------------------------------------------------------------
+
+# Helper: obstacle detection
 def is_close(distance, threshold=0.25):
-    """
-    Returns True if an obstacle is detected closer than the threshold distance.
-    'distance' is read from a Multiranger sensor.
-    'threshold' is in meters (default = 0.25 m).
-    """
+    """Returns True if an obstacle is detected within threshold (m)."""
     return distance is not None and distance < threshold
 
-
-# -------------------------------------------------------------------------
-# Helper function: move safely with obstacle avoidance
-# -------------------------------------------------------------------------
+# Helper: safe movement with avoidance
 def move_with_avoidance(commander, multiranger, target_x, target_y, z, step=0.1):
-    """
-    Moves the drone gradually toward a target position (x, y, z),
-    while continuously checking for obstacles using the Multiranger sensors.
-    
-    Parameters:
-        commander   - the high-level position commander (controls movement)
-        multiranger - sensor interface for detecting obstacles
-        target_x, target_y, z - the target coordinates to move to
-        step        - the movement increment (in meters) per loop iteration
-    """
-    # Start at current coordinates (assumed 0,0)
+    """Move gradually toward target position while checking for obstacles."""
     x, y = 0.0, 0.0
-
-    # Continue looping until drone reaches the target within ±5 cm tolerance
     while abs(x - target_x) > 0.05 or abs(y - target_y) > 0.05:
-        
-        # ---------- OBSTACLE CHECKS ----------
         if is_close(multiranger.front):
-            # If something is in front (within 25 cm), sidestep right by 20 cm
-            print("⚠️ Obstacle detected ahead — sidestepping right 20cm")
+            print("Obstacle ahead — sidestepping right 20cm")
             y += 0.2
             commander.go_to(x, y, z)
             time.sleep(0.5)
-
         elif is_close(multiranger.right):
-            # If something is on the right, sidestep left by 20 cm
-            print("⚠️ Obstacle detected on right — sidestepping left 20cm")
+            print("Obstacle on right — sidestepping left 20cm")
             y -= 0.2
             commander.go_to(x, y, z)
             time.sleep(0.5)
-
         else:
-            # ---------- NO OBSTACLE: MOVE TOWARD TARGET ----------
-            # Adjust x-position (forward/backward)
             if x < target_x:
                 x += step
             elif x > target_x:
                 x -= step
 
-            # Adjust y-position (left/right)
             if y < target_y:
                 y += step
             elif y > target_y:
                 y -= step
 
-            # Send new target position command to the drone
             commander.go_to(x, y, z)
             time.sleep(0.2)
-
-    # Once the target is reached, return the new coordinates
     return x, y
 
 
-# -------------------------------------------------------------------------
-# Main program starts here
-# -------------------------------------------------------------------------
+
+# Main program with failsafe
 if __name__ == '__main__':
-    # Initialize the Crazyflie communication drivers
-    # Must always be called before connecting to a drone
-    cflib.crtp.init_drivers()
+    try:
+        # Initialize CRTP drivers (radio)
+        cflib.crtp.init_drivers()
+        cf = Crazyflie(rw_cache='./cache')
 
-    # Create a Crazyflie object, using a cache folder for parameter downloads
-    cf = Crazyflie(rw_cache='./cache')
+        # Connect to Crazyflie safely
+        with SyncCrazyflie(URI, cf=cf) as scf:
+            scf.cf.platform.send_arming_request(True)
+            time.sleep(1.0)
 
-    # Establish a safe, synchronized connection with the Crazyflie
-    with SyncCrazyflie(URI, cf=cf) as scf:
-        # Arm (activate) the motors before flight
-        scf.cf.platform.send_arming_request(True)
-        time.sleep(1.0)
+            with PositionHlCommander(scf, default_height=0.4) as commander:
+                with Multiranger(scf) as multiranger:
 
-        # Create a high-level position commander for easy movement control
-        # Default takeoff height = 0.4 m
-        with PositionHlCommander(scf, default_height=0.4) as commander:
-            
-            # Enable the Multiranger (distance sensors)
-            with Multiranger(scf) as multiranger:
+                    print("Takeoff...")
+                    time.sleep(3)
 
-                print("Takeoff...")
-                time.sleep(3)  # Small delay to ensure stable lift-off
+                    # Define square flight path
+                    waypoints = [
+                                    (1.0, 0.0, 0.4),   # Forward
+                                    (1.0, 0.7, 0.4),   # Right
+                                    (0.0, 0.7, 0.4),   # Back
+                                    (-1.0, 0.7, 0.4),  # Back again
+                                    (-1.0, 0.0, 0.4),  # Left
+                                    (0.0, 0.0, 0.4)    # Return to start
+                                ]
 
-                # -------------------------------
-                # Define the flight path (square)
-                # -------------------------------
-                # Each waypoint is a (x, y, z) position in meters
-                waypoints = [
-                                (1.0, 0.0, 0.4),   # 1. Move forward
-                                (1.0, 0.7, 0.4),   # 2. Move right
-                                (0.0, 0.7, 0.4),   # 3. Move back
-                                (-1.0, 0.7, 0.4),  # 4. Move back again (further back)
-                                (-1.0, 0.0, 0.4),  # 5. Move left
-                                (0.0, 0.0, 0.4)    # 6. Return to start point
-                            ]
+                  
+                    # FAILSAFE VARIABLES
+                    start_time = time.time()
+                    max_flight_duration = 60   # seconds
+                    min_safe_altitude = 0.15   # meters
+                    x, y, z = 0.0, 0.0, 0.4
 
-                # Start position (origin)
-                x, y, z = 0.0, 0.0, 0.4
+                    for i, (target_x, target_y, target_z) in enumerate(waypoints):
+                        print(f"➡️ Moving to waypoint {i+1}: ({target_x}, {target_y}, {target_z})")
 
-                # -------------------------------
-                # Execute each waypoint in sequence
-                # -------------------------------
-                for i, (target_x, target_y, target_z) in enumerate(waypoints):
-                    print(f"➡️ Moving to waypoint {i+1}: ({target_x}, {target_y}, {target_z})")
+                        #Failsafe 1: timeout check
+                        if time.time() - start_time > max_flight_duration:
+                            print("Failsafe: Maximum flight time exceeded. Landing.")
+                            commander.land(0.0, 2.0)
+                            raise SystemExit
 
-                    # Move with obstacle avoidance toward each waypoint
-                    x, y = move_with_avoidance(commander, multiranger, target_x, target_y, target_z)
-                    time.sleep(1)
+                        #Failsafe 2: link loss check 
+                        if not scf.cf.link:
+                            print(" Failsafe: Lost radio link! Attempting to land.")
+                            commander.land(0.0, 2.0)
+                            time.sleep(3)
+                            raise SystemExit
 
-                # -------------------------------
-                # End of mission: hover and land
-                # -------------------------------
-                print("Square path complete. Hovering for 5 seconds...")
-                time.sleep(5)
+                        #Failsafe 3: altitude safety
+                        if multiranger.up and multiranger.up > 1.5:
+                            print(" Altitude unexpectedly high — initiating emergency descent")
+                            commander.land(0.0, 2.0)
+                            raise SystemExit
 
-                print("Landing...")
-                commander.land(0.0, 2.0)  # Smooth landing
-                time.sleep(3)
+                        # Execute movement with obstacle avoidance
+                        x, y = move_with_avoidance(commander, multiranger, target_x, target_y, target_z)
+                        time.sleep(1)
 
-                print("Mission completed safely!")
+                    print("Square path complete. Hovering 5s...")
+                    time.sleep(5)
+
+                    print(" Landing...")
+                    commander.land(0.0, 2.0)
+                    time.sleep(3)
+                    print("Mission completed safely!")
+
+
+    # FAILSAFE 4: Manual abort (Ctrl + C)
+    except KeyboardInterrupt:
+        print("\n Manual abort detected (Ctrl+C) — landing immediately.")
+        try:
+            commander.land(0.0, 2.0)
+        except Exception:
+            pass
+        time.sleep(3)
+
+
+    # General exception catch-all
+    except Exception as e:
+        print(f" Unexpected error: {e}")
+        try:
+            commander.land(0.0, 2.0)
+        except Exception:
+            pass
+        time.sleep(3)
+        print(" Drone disarmed and safe.")
