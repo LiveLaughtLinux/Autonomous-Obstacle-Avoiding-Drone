@@ -78,7 +78,7 @@ if __name__ == '__main__':
 
                     # Execute sequence
                     for i, (tx, ty, tz, t) in enumerate(newsequence):
-                        print(f"➡️ Step {i+1}/{len(newsequence)}: ({tx}, {ty}, {tz})")
+                        print(f" Step {i+1}/{len(newsequence)}: ({tx}, {ty}, {tz})")
                         if time.time() - start_time > max_flight_duration:
                             print(" Failsafe: Max flight time exceeded — landing.")
                             commander.land(0.0, 2.0)
