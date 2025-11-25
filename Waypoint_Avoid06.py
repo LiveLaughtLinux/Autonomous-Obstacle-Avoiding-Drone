@@ -1,4 +1,4 @@
-# Fixed full script: hard-coded bypass (A+1)
+# Crazyflie Obstacle Avoidance – Slow + Long-Range Detection
 import logging
 import time
 import cflib.crtp
@@ -9,10 +9,10 @@ from cflib.utils import uri_helper
 from cflib.utils.multiranger import Multiranger
 
 # Connection setup
-URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E707')
+URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E702')
 logging.basicConfig(level=logging.ERROR)
 
-# Waypoints (your newsequence)
+# Waypoints
 z0 = 0.4
 x0 = 1.0
 x1 = 0.0
@@ -21,161 +21,139 @@ y0 = 0.0
 y1 = -0.4
 
 newsequence = [
-    (x1, y0, z0, 3.0),  # Start (initial hover)
-    (x0, y0, z0, 3.0),  # Forward
-    (x0, y1, z0, 3.0),  # Right
-    (x1, y1, z0, 3.0),  # Back
-    (x2, y1, z0, 3.0),  # Back again (further back)
-    (x2, y0, z0, 3.0),  # Left
-    (x1, y0, z0, 3.0),  # Return to start
+    (x1, y0, z0, 3.0),
+    (x0, y0, z0, 3.0),
+    (x0, y1, z0, 3.0),
+    (x1, y1, z0, 3.0),
+    (x2, y1, z0, 3.0),
+    (x2, y0, z0, 3.0),
+    (x1, y0, z0, 3.0),
 ]
 
-# Helper: detect nearby obstacle
-def is_close(distance, threshold=0.25):
-    """Detect nearby obstacle within threshold (m)."""
+# ------------------------------
+# Helper functions
+# ------------------------------
+
+def is_close(distance, threshold=0.60):    # ← EXPANDED RANGE
     return distance is not None and distance < threshold
 
-def get_commander_position(commander):
-    """
-    Safely read current commander position. PositionHlCommander stores recent
-    position in _x, _y, _z (private) — use with fallback to (0,0,default_z).
-    """
+
+def get_pos(commander):
+    """Read current estimated X,Y,Z from commander."""
     try:
-        cx = float(getattr(commander, "_x", 0.0))
-        cy = float(getattr(commander, "_y", 0.0))
-        cz = float(getattr(commander, "_z", 0.4))
-    except Exception:
-        cx, cy, cz = 0.0, 0.0, 0.4
-    return cx, cy, cz
+        x = float(getattr(commander, "_x", 0.0))
+        y = float(getattr(commander, "_y", 0.0))
+        z = float(getattr(commander, "_z", z0))
+        return x, y, z
+    except:
+        return 0.0, 0.0, z0
 
-def move_with_avoidance(commander, multiranger, target_x, target_y, target_z, duration):
+
+def move_towards(commander, tx, ty, tz):
+    """Slow movement: interpolate position (like low-speed mode)."""
+    cx, cy, cz = get_pos(commander)
+
+    step = 0.05   # SMALL step = lower speed
+
+    # Step x
+    if abs(tx - cx) > step:
+        cx += step if (tx > cx) else -step
+    else:
+        cx = tx
+
+    # Step y
+    if abs(ty - cy) > step:
+        cy += step if (ty > cy) else -step
+    else:
+        cy = ty
+
+    commander.go_to(cx, cy, tz)
+    time.sleep(0.05)
+
+
+def move_with_avoidance(commander, multiranger, tx, ty, tz, duration):
     """
-    Move to target waypoint with a hard-coded bypass when obstacle is detected in front.
-    Steps (when obstacle seen):
-      1) sidestep left 0.5 m (relative to current position)
-      2) move forward 0.5 m
-      3) move right 0.5 m (rejoin original Y line)
-    After bypass the function returns immediately so main sequence continues.
+    Move toward waypoint slowly & with extended-range avoidance.
     """
-    start_time = time.time()
-    print(f">>> Moving to ({target_x}, {target_y}, {target_z}) for {duration}s")
+    start = time.time()
+    print(f">>> Moving to ({tx}, {ty}, {tz}) for {duration}s")
 
-    while time.time() - start_time < duration:
-        # If obstacle directly in front: execute hard-coded bypass (relative to current pos)
-        if is_close(multiranger.front):
-            print("Obstacle ahead — executing hard-coded bypass")
+    while time.time() - start < duration:
 
-            # read current position
-            cx, cy, cz = get_commander_position(commander)
+        front = multiranger.front
+        right = multiranger.right
 
-            # 1) Sidestep LEFT by 0.5 m
-            sidestep_y = cy - 0.5
-            print(f" Sidestep to ({cx:.2f}, {sidestep_y:.2f}, {cz:.2f})")
-            commander.go_to(cx, sidestep_y, cz)
+        # ---- FRONT OBSTACLE ----
+        if is_close(front):
+            print("Obstacle detected in FRONT → executing bypass")
+            cx, cy, cz = get_pos(commander)
+
+            sidestep = 0.5
+            forward = 0.5
+
+            commander.go_to(cx, cy - sidestep, cz)
             time.sleep(1.0)
 
-            # 2) Move FORWARD by 0.5 m (in X)
-            forward_x = cx + 0.5
-            print(f" Move forward to ({forward_x:.2f}, {sidestep_y:.2f}, {cz:.2f})")
-            commander.go_to(forward_x, sidestep_y, cz)
+            commander.go_to(cx + forward, cy - sidestep, cz)
             time.sleep(1.0)
 
-            # 3) Move RIGHT by 0.5 m to rejoin original Y-line
-            rejoin_y = sidestep_y + 0.5  # should equal original cy
-            print(f" Rejoin path at ({forward_x:.2f}, {rejoin_y:.2f}, {cz:.2f})")
-            commander.go_to(forward_x, rejoin_y, cz)
+            commander.go_to(cx + forward, cy, cz)
             time.sleep(1.0)
 
-            print("Bypass complete — continuing to next waypoint\n")
-            return  # important: stop this waypoint's loop and continue main sequence
+            print("Bypass complete")
+            return
 
-        # If obstacle on right, do a simple left sidestep to create clearance then continue
-        if is_close(multiranger.right):
-            cx, cy, cz = get_commander_position(commander)
-            sidestep_y = cy - 0.5
-            print(f" Obstacle right — sidestep left to ({cx:.2f}, {sidestep_y:.2f}, {cz:.2f})")
-            commander.go_to(cx, sidestep_y, cz)
+        # ---- RIGHT OBSTACLE ----
+        if is_close(right):
+            print("Obstacle on RIGHT → sidestep LEFT 0.5m")
+            cx, cy, cz = get_pos(commander)
+            commander.go_to(cx, cy - 0.5, cz)
             time.sleep(1.0)
             return
 
-        # No obstacle: go to target waypoint
-        commander.go_to(target_x, target_y, target_z)
-        time.sleep(0.1)
+        # ---- NO OBSTACLE → SLOW MOVEMENT ----
+        move_towards(commander, tx, ty, tz)
 
-    # duration elapsed (arrived or timed out in this waypoint)
     return
 
-# Main program with failsafe
-if __name__ == '__main__':
+
+# ------------------------------
+# MAIN PROGRAM
+# ------------------------------
+
+if __name__ == "__main__":
     try:
         cflib.crtp.init_drivers()
-        cf = Crazyflie(rw_cache='./cache')
+        cf = Crazyflie(rw_cache="./cache")
 
         with SyncCrazyflie(URI, cf=cf) as scf:
             scf.cf.platform.send_arming_request(True)
             time.sleep(1.0)
 
-            with PositionHlCommander(scf, default_height=z0) as commander:
-                with Multiranger(scf) as multiranger:
+            with PositionHlCommander(scf, default_height=z0,
+                                     controller=PositionHlCommander.CONTROLLER_PID) as commander:
 
+                with Multiranger(scf) as multiranger:
                     print("Takeoff...")
                     time.sleep(3)
 
-                    # FAILSAFE VARIABLES
-                    start_time = time.time()
-                    max_flight_duration = 120  # total mission timeout (seconds)
-                    min_safe_altitude = 0.15
-
-                    # Execute sequence
                     for i, (tx, ty, tz, t) in enumerate(newsequence):
-                        print(f" Waypoint {i+1}/{len(newsequence)}: ({tx}, {ty}, {tz})")
-
-                        # Failsafe: overall mission timeout
-                        if time.time() - start_time > max_flight_duration:
-                            print(" Failsafe: Maximum flight time exceeded. Landing.")
-                            commander.land(0.0, 2.0)
-                            raise SystemExit
-
-                        # Failsafe: radio link lost
-                        if not scf.cf.link:
-                            print(" Failsafe: Lost radio link! Attempting to land.")
-                            commander.land(0.0, 2.0)
-                            time.sleep(3)
-                            raise SystemExit
-
-                        # Failsafe: altitude too low/high via multiranger.up reading (if available)
-                        if getattr(multiranger, "up", None) is not None:
-                            if multiranger.up and multiranger.up < min_safe_altitude:
-                                print("Failsafe: Altitude too low — landing.")
-                                commander.land(0.0, 2.0)
-                                raise SystemExit
-
-                        # Call move_with_avoidance (pass duration)
+                        print(f"Waypoint {i+1}/{len(newsequence)}: ({tx}, {ty}, {tz})")
                         move_with_avoidance(commander, multiranger, tx, ty, tz, t)
-                        # small pause before next waypoint
-                        time.sleep(0.5)
+                        time.sleep(0.3)
 
-                    print("Sequence complete — hovering 5s...")
+                    print("Sequence complete — hovering...")
                     time.sleep(5)
 
                     print("Landing...")
                     commander.land(0.0, 2.0)
                     time.sleep(3)
-                    print("Mission completed successfully ")
-
-    except KeyboardInterrupt:
-        print("\n Manual abort (Ctrl+C) — landing immediately.")
-        try:
-            commander.land(0.0, 2.0)
-        except Exception:
-            pass
-        time.sleep(3)
 
     except Exception as e:
-        print(f" Unexpected error: {e}")
+        print("Unexpected error:", e)
         try:
             commander.land(0.0, 2.0)
-        except Exception:
+        except:
             pass
-        time.sleep(3)
-        print("Drone disarmed and safe.")
+        time.sleep(2)
+        print("Drone disarmed safely.")
