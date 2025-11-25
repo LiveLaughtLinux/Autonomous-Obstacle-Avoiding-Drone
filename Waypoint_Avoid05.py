@@ -1,4 +1,4 @@
-#Importing modules and libraries
+# Crazyflie Obstacle Avoidance – Slow + Medium Detection Range
 import logging
 import time
 import cflib.crtp
@@ -8,142 +8,152 @@ from cflib.positioning.position_hl_commander import PositionHlCommander
 from cflib.utils import uri_helper
 from cflib.utils.multiranger import Multiranger
 
-
 # Connection setup
-URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E700')
+URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E702')
 logging.basicConfig(level=logging.ERROR)
 
+# Waypoints
+z0 = 0.4
+x0 = 1.0
+x1 = 0.0
+x2 = -1.0
+y0 = 0.0
+y1 = -0.4
 
-# Helper: obstacle detection
-def is_close(distance, threshold=0.25):
-    """Returns True if an obstacle is detected within threshold (m)."""
+newsequence = [
+    (x1, y0, z0, 3.0),
+    (x0, y0, z0, 3.0),
+    (x0, y1, z0, 3.0),
+    (x1, y1, z0, 3.0),
+    (x2, y1, z0, 3.0),
+    (x2, y0, z0, 3.0),
+    (x1, y0, z0, 3.0),
+]
+
+# ------------------------------
+# Helper functions
+# ------------------------------
+
+def is_close(distance, threshold=0.45):   # ← REDUCED detection range
     return distance is not None and distance < threshold
 
-# Helper: safe movement with avoidance
-def move_with_avoidance(commander, multiranger, target_x, target_y, target_z, duration):
-    """Move to target waypoint with a fixed, predictable obstacle bypass."""
-    start_time = time.time()
-    print(f" Moving to ({target_x}, {target_y}, {target_z}) for {duration}s")
 
-    # Normal movement loop
-    while time.time() - start_time < duration:
-
-      
-        # AVOIDANCE
-        if is_close(multiranger.front):
-            print("Obstacle in front — executing hard-coded bypass")
-
-            # 1. Sidestep LEFT 0.5 m
-            print("Sidestep left 0.5 m")
-            commander.go_to(target_x, target_y - 0.5, target_z)
-            time.sleep(1.0)
-
-            # 2. Move FORWARD 0.5 m
-            print("Move forward 0.5 m")
-            commander.go_to(target_x + 0.5, target_y - 0.5, target_z)
-            time.sleep(1.0)
-
-            # 3. Move RIGHT 0.5 m (return to original Y line)
-            print("Return right 0.5 m to rejoin path")
-            commander.go_to(target_x + 0.5, target_y, target_z)
-            time.sleep(1.0)
-
-            print("Bypass complete — resuming next waypoint\n")
-            return  #  return immediately to continue sequence
-
-        # NO OBSTACLE → NORMAL POINT MOVE
-        commander.go_to(target_x, target_y, target_z)
-        time.sleep(0.1)
-
-
-
-
-# Main program with failsafe
-if __name__ == '__main__':
+def get_pos(commander):
     try:
-        # Initialize CRTP drivers (radio)
-        cflib.crtp.init_drivers()
-        cf = Crazyflie(rw_cache='./cache')
+        x = float(getattr(commander, "_x", 0.0))
+        y = float(getattr(commander, "_y", 0.0))
+        z = float(getattr(commander, "_z", z0))
+        return x, y, z
+    except:
+        return 0.0, 0.0, z0
 
-        # Connect to Crazyflie safely
+
+def move_towards(commander, tx, ty, tz):
+    cx, cy, cz = get_pos(commander)
+
+    step = 0.05   # slow speed
+
+    if abs(tx - cx) > step:
+        cx += step if tx > cx else -step
+    else:
+        cx = tx
+
+    if abs(ty - cy) > step:
+        cy += step if ty > cy else -step
+    else:
+        cy = ty
+
+    commander.go_to(cx, cy, tz)
+    time.sleep(0.05)
+
+
+def move_with_avoidance(commander, multiranger, tx, ty, tz, duration):
+    start = time.time()
+    print(f">>> Moving to ({tx}, {ty}, {tz}) for {duration}s")
+
+    while time.time() - start < duration:
+
+        front = multiranger.front
+        right = multiranger.right
+
+        # ---- FRONT OBSTACLE: new maneuver ----
+        if is_close(front):
+            print("Obstacle detected in FRONT → executing NEW bypass")
+            cx, cy, cz = get_pos(commander)
+
+            sidestep_right = 0.5
+            forward = 0.8
+            sidestep_left = 0.8
+
+            # 1) Move RIGHT 0.5
+            commander.go_to(cx, cy + sidestep_right, cz)
+            time.sleep(1.0)
+
+            # 2) Move FORWARD 0.8
+            commander.go_to(cx + forward, cy + sidestep_right, cz)
+            time.sleep(1.0)
+
+            # 3) Move LEFT 0.8
+            commander.go_to(cx + forward, cy + sidestep_right - sidestep_left, cz)
+            time.sleep(1.0)
+
+            print("Bypass complete")
+            return
+
+        # ---- RIGHT OBSTACLE SMALL SIDESTEP ----
+        if is_close(right):
+            print("Obstacle on RIGHT → shift LEFT 0.5m")
+            cx, cy, cz = get_pos(commander)
+            commander.go_to(cx, cy - 0.5, cz)
+            time.sleep(1.0)
+            return
+
+        # ---- No obstacle: move slowly toward waypoint ----
+        move_towards(commander, tx, ty, tz)
+
+    return
+
+
+# ------------------------------
+# MAIN PROGRAM
+# ------------------------------
+
+if __name__ == "__main__":
+    try:
+        cflib.crtp.init_drivers()
+        cf = Crazyflie(rw_cache="./cache")
+
         with SyncCrazyflie(URI, cf=cf) as scf:
             scf.cf.platform.send_arming_request(True)
             time.sleep(1.0)
 
-            with PositionHlCommander(scf, default_height=0.4) as commander:
-                with Multiranger(scf) as multiranger:
+            with PositionHlCommander(
+                scf,
+                default_height=z0,
+                controller=PositionHlCommander.CONTROLLER_PID
+            ) as commander:
 
+                with Multiranger(scf) as multiranger:
                     print("Takeoff...")
                     time.sleep(3)
 
-                    # Define square flight path
-                    waypoints = [
-                                    (1.0, 0.0, 0.4),   # Forward
-                                    (1.0, 0.7, 0.4),   # Right
-                                    (0.0, 0.7, 0.4),   # Back
-                                    (-1.0, 0.7, 0.4),  # Back again
-                                    (-1.0, 0.0, 0.4),  # Left
-                                    (0.0, 0.0, 0.4)    # Return to start
-                                ]
+                    for i, (tx, ty, tz, t) in enumerate(newsequence):
+                        print(f"Waypoint {i+1}/{len(newsequence)}: ({tx}, {ty}, {tz})")
+                        move_with_avoidance(commander, multiranger, tx, ty, tz, t)
+                        time.sleep(0.3)
 
-                  
-                    # FAILSAFE VARIABLES
-                    start_time = time.time()
-                    max_flight_duration = 60   # seconds
-                    min_safe_altitude = 0.15   # meters
-                    x, y, z = 0.0, 0.0, 0.4
-
-                    for i, (target_x, target_y, target_z) in enumerate(waypoints):
-                        print(f"➡️ Moving to waypoint {i+1}: ({target_x}, {target_y}, {target_z})")
-
-                        #Failsafe 1: timeout check
-                        if time.time() - start_time > max_flight_duration:
-                            print("Failsafe: Maximum flight time exceeded. Landing.")
-                            commander.land(0.0, 2.0)
-                            raise SystemExit
-
-                        #Failsafe 2: link loss check 
-                        if not scf.cf.link:
-                            print(" Failsafe: Lost radio link! Attempting to land.")
-                            commander.land(0.0, 2.0)
-                            time.sleep(3)
-                            raise SystemExit
-
-                        #Failsafe 3: altitude safety
-                        if multiranger.up and multiranger.up > 1.5:
-                            print(" Altitude unexpectedly high — initiating emergency descent")
-                            commander.land(0.0, 2.0)
-                            raise SystemExit
-
-                        # Execute movement with obstacle avoidance
-                        x, y = move_with_avoidance(commander, multiranger, target_x, target_y, target_z)
-                        time.sleep(1)
-
-                    print("Square path complete. Hovering 5s...")
+                    print("Sequence complete — hovering...")
                     time.sleep(5)
 
-                    print(" Landing...")
+                    print("Landing...")
                     commander.land(0.0, 2.0)
                     time.sleep(3)
-                    print("Mission completed safely!")
 
-
-    # FAILSAFE 4: Manual abort (Ctrl + C)
-    except KeyboardInterrupt:
-        print("\n Manual abort detected (Ctrl+C) — landing immediately.")
-        try:
-            commander.land(0.0, 2.0)
-        except Exception:
-            pass
-        time.sleep(3)
-
-
-    # General exception catch-all
     except Exception as e:
-        print(f" Unexpected error: {e}")
+        print("Unexpected error:", e)
         try:
             commander.land(0.0, 2.0)
-        except Exception:
+        except:
             pass
-        time.sleep(3)
-        print(" Drone disarmed and safe.")
+        time.sleep(2)
+        print("Drone disarmed safely.")
