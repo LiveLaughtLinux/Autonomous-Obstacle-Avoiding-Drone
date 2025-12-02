@@ -83,7 +83,7 @@ def move_with_avoidance(commander, multiranger, tx, ty, tz, duration):
 
             sidestep_right = 0.5
             forward = 0.8
-            sidestep_left = 0.8
+            sidestep_left = 0.5
 
             # 1) Move RIGHT 0.5
             commander.go_to(cx, cy + sidestep_right, cz)
@@ -93,7 +93,7 @@ def move_with_avoidance(commander, multiranger, tx, ty, tz, duration):
             commander.go_to(cx + forward, cy + sidestep_right, cz)
             time.sleep(1.0)
 
-            # 3) Move LEFT 0.8
+            # 3) Move LEFT 0.5
             commander.go_to(cx + forward, cy + sidestep_right - sidestep_left, cz)
             time.sleep(1.0)
 
