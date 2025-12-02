@@ -9,7 +9,7 @@ from cflib.utils import uri_helper
 from cflib.utils.multiranger import Multiranger
 
 # Connection setup
-URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E702')
+URI = uri_helper.uri_from_env(default='radio://0/80/2M/E7E7E7E705')
 logging.basicConfig(level=logging.ERROR)
 
 # Waypoints
@@ -85,16 +85,16 @@ def move_with_avoidance(commander, multiranger, tx, ty, tz, duration):
             forward = 0.8
             sidestep_left = 0.5
 
-            # 1) Move RIGHT 0.5
-            commander.go_to(cx, cy + sidestep_right, cz)
+            # 1) Move LEFT 0.5
+            commander.go_to(cx, cy + sidestep_left, cz)
             time.sleep(1.0)
 
             # 2) Move FORWARD 0.8
-            commander.go_to(cx + forward, cy + sidestep_right, cz)
+            commander.go_to(cx + forward, cy + sidestep_left, cz)
             time.sleep(1.0)
 
-            # 3) Move LEFT 0.5
-            commander.go_to(cx + forward, cy + sidestep_right - sidestep_left, cz)
+            # 3) Move RIGHT 0.5
+            commander.go_to(cx + forward, cy + sidestep_left - sidestep_right, cz)
             time.sleep(1.0)
 
             print("Bypass complete")
